@@ -12,6 +12,7 @@ const RockPaperScissors = () => {
   const [isCameraConnected, setIsCameraConnected] = useState(false);
   const [isPythonConnected, setIsPythonConnected] = useState(false);
   const [computerChoice, setComputerChoice] = useState(null);
+  const [cursorPosition, setCursorPosition] = useState({ x: 0, y: 0 });
   const ws = useRef(null);
 
   useEffect(() => {
@@ -35,7 +36,14 @@ const RockPaperScissors = () => {
         const data = JSON.parse(event.data);
         console.log('Received:', data);
 
-        if (data.type === 'gestureUpdate' && data.gesture) {
+        if (data.type === 'handPosition') {
+          console.log('Hand position:', data.x, data.y);
+          setCursorPosition({
+            x: data.x * window.innerWidth,
+            y: data.y * window.innerHeight
+          });
+        }
+        else if (data.type === 'gestureUpdate' && data.gesture) {
           setGesture(data.gesture);
         } else if (data.type === 'gameResult') {
           setResult(data.result);
@@ -112,7 +120,24 @@ const RockPaperScissors = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-900 via-purple-900 to-indigo-900 text-white p-4">
+    <div className="min-h-screen bg-gradient-to-br from-blue-900 via-purple-900 to-indigo-900 text-white p-4 relative">
+      {/* Cursor */}
+      <div 
+        className="fixed pointer-events-none z-50"
+        style={{
+          left: `${cursorPosition.x}px`,
+          top: `${cursorPosition.y}px`,
+          transform: 'translate(-50%, -50%)',
+          transition: 'all 0.05s ease',
+          width: '24px',
+          height: '24px',
+        }}
+      >
+        <div className="absolute inset-0 rounded-full bg-blue-500 opacity-30 animate-pulse"></div>
+        <div className="absolute inset-2 rounded-full bg-blue-500 opacity-60"></div>
+        <div className="absolute inset-3 rounded-full bg-white"></div>
+      </div>
+
       <div className="max-w-4xl mx-auto">
         <div className="absolute top-4 right-4 flex flex-col gap-2">
           <div className="flex items-center gap-2">

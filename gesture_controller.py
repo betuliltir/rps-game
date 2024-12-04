@@ -7,7 +7,7 @@ import threading
 import logging
 import random
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 class RPSGestureController:
     def __init__(self):
@@ -25,6 +25,20 @@ class RPSGestureController:
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.start_websocket_server()
+        self.last_hand_position = None
+
+    def calculate_distance(self, p1, p2):
+        return ((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2) ** 0.5
+
+    def detect_pinch(self, hand_landmarks):
+        thumb_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_TIP]
+        index_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
+        
+        # Parmak uçları arasındaki mesafeyi hesapla
+        distance = self.calculate_distance(thumb_tip, index_tip)
+        
+        # Mesafe belirli bir eşiğin altındaysa pinch olarak kabul et
+        return distance < 0.05
 
     async def handler(self, websocket):
         logging.info("New client connected")
@@ -34,36 +48,103 @@ class RPSGestureController:
             async for message in websocket:
                 try:
                     data = json.loads(message)
-                    logging.debug(f"Received message: {data}")
                     if data.get('type') == 'gameStart':
                         self.game_active = True
-                        logging.info("Game started, waiting 3 seconds...")
                         await asyncio.sleep(3)
                         if self.current_gesture:
                             game_result = self.play_game(self.current_gesture)
-                            logging.info(f"Game result: {game_result}")
                             await websocket.send(json.dumps(game_result))
-                        else:
-                            logging.warning("No gesture detected at game end")
                         self.game_active = False
                     elif data.get('type') == 'reset':
                         self.game_active = False
                         self.current_gesture = None
-                        logging.info("Game reset")
-                except json.JSONDecodeError as e:
-                    logging.error(f"JSON decode error: {e}")
-                    continue
+                except Exception as e:
+                    logging.error(f"Error handling message: {e}")
         except websockets.exceptions.ConnectionClosed:
             logging.info("Client disconnected")
         finally:
             self.websocket = None
 
+    def detect_gesture(self, hand_landmarks):
+        fingers_extended = []
+        
+        # Thumb
+        thumb_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_TIP]
+        thumb_ip = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_IP]
+        fingers_extended.append(thumb_tip.x < thumb_ip.x)
+
+        # Other fingers
+        finger_tips = [
+            self.mp_hands.HandLandmark.INDEX_FINGER_TIP,
+            self.mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
+            self.mp_hands.HandLandmark.RING_FINGER_TIP,
+            self.mp_hands.HandLandmark.PINKY_TIP
+        ]
+        finger_pips = [
+            self.mp_hands.HandLandmark.INDEX_FINGER_PIP,
+            self.mp_hands.HandLandmark.MIDDLE_FINGER_PIP,
+            self.mp_hands.HandLandmark.RING_FINGER_PIP,
+            self.mp_hands.HandLandmark.PINKY_PIP
+        ]
+
+        for finger_tip, finger_pip in zip(finger_tips, finger_pips):
+            tip = hand_landmarks.landmark[finger_tip]
+            pip = hand_landmarks.landmark[finger_pip]
+            fingers_extended.append(tip.y < pip.y)
+
+        extended_count = sum(fingers_extended)
+
+        if extended_count <= 1:
+            return "rock"
+        elif extended_count >= 4:
+            return "paper"
+        elif fingers_extended[1] and fingers_extended[2] and not fingers_extended[3] and not fingers_extended[4]:
+            return "scissors"
+        
+        return "Waiting..."
+
+    def get_hand_position(self, hand_landmarks):
+        index_finger_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
+        is_pinching = self.detect_pinch(hand_landmarks)
+        
+        return {
+            'x': index_finger_tip.x,
+            'web_x': 1.0 - index_finger_tip.x,
+            'y': index_finger_tip.y,
+            'is_clicking': is_pinching
+        }
+
+    async def send_hand_position(self, hand_position):
+        if self.websocket:
+            try:
+                if (self.last_hand_position is None or
+                    abs(hand_position['web_x'] - self.last_hand_position.get('web_x', 0)) > 0.0001 or
+                    abs(hand_position['y'] - self.last_hand_position.get('y', 0)) > 0.0001 or
+                    hand_position['is_clicking'] != self.last_hand_position.get('is_clicking', False)):
+                    
+                    await self.websocket.send(json.dumps({
+                        'type': 'handPosition',
+                        'x': hand_position['web_x'],
+                        'y': hand_position['y'],
+                        'isClicking': hand_position['is_clicking']
+                    }))
+                    self.last_hand_position = hand_position
+            except Exception as e:
+                logging.error(f"Error sending hand position: {e}")
+
+    async def send_gesture_data(self, data):
+        if self.websocket and not self.game_active:
+            try:
+                if data.get('gesture') != self.current_gesture:
+                    await self.websocket.send(json.dumps({**data, 'type': 'gestureUpdate'}))
+                    self.current_gesture = data.get('gesture')
+            except Exception as e:
+                logging.error(f"Error sending gesture data: {e}")
+
     def play_game(self, player_gesture):
         choices = ['rock', 'paper', 'scissors']
         computer_choice = random.choice(choices)
         
-        logging.info(f"Player chose: {player_gesture}, Computer chose: {computer_choice}")
-
         if player_gesture == computer_choice:
             result = 'Tie'
         elif (player_gesture == 'rock' and computer_choice == 'scissors') or \
@@ -74,10 +155,10 @@ class RPSGestureController:
             result = 'Lose'
 
         return {
+            'type': 'gameResult',
             'result': result,
             'playerMove': player_gesture,
-            'computerMove': computer_choice,
-            'type': 'gameResult'
+            'computerMove': computer_choice
         }
 
     def start_websocket_server(self):
@@ -92,76 +173,44 @@ class RPSGestureController:
         self.server_thread = threading.Thread(target=run_server, daemon=True)
         self.server_thread.start()
 
-    async def send_gesture_data(self, data):
-        if self.websocket and not self.game_active:
-            try:
-                if data.get('gesture') != self.current_gesture:
-                    logging.debug(f"Sending gesture data: {data}")
-                    await self.websocket.send(json.dumps({**data, 'type': 'gestureUpdate'}))
-                    self.current_gesture = data.get('gesture')
-            except Exception as e:
-                logging.error(f"Error sending gesture data: {e}")
-
-    def detect_gesture(self, hand_landmarks):
-        fingers_extended = []
-
-        # Thumb
-        thumb_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_TIP]
-        thumb_ip = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_IP]
-        
-        # Calculate thumb state based on horizontal position
-        fingers_extended.append(thumb_tip.x < thumb_ip.x)
-
-        # Other fingers
-        fingers = [
-            self.mp_hands.HandLandmark.INDEX_FINGER_TIP,
-            self.mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
-            self.mp_hands.HandLandmark.RING_FINGER_TIP,
-            self.mp_hands.HandLandmark.PINKY_TIP
-        ]
-        fingers_pip = [
-            self.mp_hands.HandLandmark.INDEX_FINGER_PIP,
-            self.mp_hands.HandLandmark.MIDDLE_FINGER_PIP,
-            self.mp_hands.HandLandmark.RING_FINGER_PIP,
-            self.mp_hands.HandLandmark.PINKY_PIP
-        ]
-
-        for finger_tip, finger_pip in zip(fingers, fingers_pip):
-            tip = hand_landmarks.landmark[finger_tip]
-            pip = hand_landmarks.landmark[finger_pip]
-            # Finger is extended if tip is higher than pip
-            fingers_extended.append(tip.y < pip.y)
-
-        extended_count = sum(fingers_extended)
-        
-        # Debug information
-        logging.debug(f"Extended fingers: {fingers_extended}, Count: {extended_count}")
-
-        if extended_count <= 1:
-            return "rock"
-        elif extended_count >= 4:
-            return "paper"
-        elif fingers_extended[1] and fingers_extended[2] and not fingers_extended[3] and not fingers_extended[4]:
-            return "scissors"
-        
-        return "Waiting..."
-
     def process_frame(self, frame):
         frame = cv2.flip(frame, 1)
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.hands.process(rgb_frame)
 
         gesture_data = {"gesture": "Waiting..."}
+        hand_position = None
 
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
                 self.mp_draw.draw_landmarks(frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
+                
+                hand_position = self.get_hand_position(hand_landmarks)
+                
+                # İşaret parmağı pozisyonunu ve click durumunu görsel olarak işaretle
+                if hand_position:
+                    h, w, _ = frame.shape
+                    cx = int(hand_position['x'] * w)
+                    cy = int(hand_position['y'] * h)
+                    
+                    # Click durumuna göre görsel geri bildirim
+                    if hand_position['is_clicking']:
+                        cv2.circle(frame, (cx, cy), 12, (0, 0, 255), -1)  # Kırmızı dolu daire
+                    else:
+                        cv2.circle(frame, (cx, cy), 8, (0, 255, 0), -1)   # Yeşil nokta
+                        cv2.circle(frame, (cx, cy), 12, (0, 255, 0), 2)   # Yeşil dış çember
+                
                 gesture = self.detect_gesture(hand_landmarks)
                 if gesture:
                     gesture_data["gesture"] = gesture
-                    logging.debug(f"Detected gesture: {gesture}")
 
-        return frame, gesture_data
+            if hand_position and self.websocket:
+                asyncio.run_coroutine_threadsafe(
+                    self.send_hand_position(hand_position),
+                    self.loop
+                )
+
+        return frame, gesture_data, hand_position
 
     def start(self):
         cap = cv2.VideoCapture(0)
@@ -179,7 +228,7 @@ class RPSGestureController:
                     logging.warning("Failed to read frame")
                     continue
 
-                frame, gesture_data = self.process_frame(frame)
+                frame, gesture_data, hand_position = self.process_frame(frame)
 
                 asyncio.run_coroutine_threadsafe(
                     self.send_gesture_data(gesture_data),
@@ -188,8 +237,7 @@ class RPSGestureController:
 
                 cv2.imshow('Rock Paper Scissors', frame)
 
-                if cv2.waitKey(1) & 0xFF == 27:  # Exit on ESC
-                    logging.info("ESC pressed, exiting...")
+                if cv2.waitKey(1) & 0xFF == 27:  # ESC tuşu ile çık
                     break
         finally:
             cap.release()
