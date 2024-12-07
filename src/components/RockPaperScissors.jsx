@@ -13,7 +13,13 @@ const RockPaperScissors = () => {
   const [isPythonConnected, setIsPythonConnected] = useState(false);
   const [computerChoice, setComputerChoice] = useState(null);
   const [cursorPosition, setCursorPosition] = useState({ x: 0, y: 0 });
+  const [scrollPosition, setScrollPosition] = useState(0);
   const ws = useRef(null);
+  const recentMatchesRef = useRef(null);
+
+  const isPointInRect = (x, y, rect) => {
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  };
 
   useEffect(() => {
     const checkCamera = async () => {
@@ -37,13 +43,44 @@ const RockPaperScissors = () => {
         console.log('Received:', data);
 
         if (data.type === 'handPosition') {
-          console.log('Hand position:', data.x, data.y);
-          setCursorPosition({
-            x: data.x * window.innerWidth,
-            y: data.y * window.innerHeight
-          });
-        }
-        else if (data.type === 'gestureUpdate' && data.gesture) {
+          const cursorX = data.x * window.innerWidth;
+          const cursorY = data.y * window.innerHeight;
+          setCursorPosition({ x: cursorX, y: cursorY });
+
+          // Buton kontrolü için cursor pozisyonunu kontrol et
+          const startButton = document.querySelector('.start-button');
+          const resetButton = document.querySelector('.reset-button');
+          const recentMatchesArea = recentMatchesRef.current;
+          
+          if (startButton && resetButton) {
+            const startRect = startButton.getBoundingClientRect();
+            const resetRect = resetButton.getBoundingClientRect();
+            
+            // Cursor butonların üzerinde mi ve tıklama var mı kontrol et
+            if (data.isClicking) {
+              if (isPointInRect(cursorX, cursorY, startRect)) {
+                startGame();
+              } else if (isPointInRect(cursorX, cursorY, resetRect)) {
+                resetGame();
+              }
+            }
+          }
+
+          // Scroll kontrolü
+          if (data.scrollDirection && recentMatchesRef.current) {
+            const recentMatchesRect = recentMatchesRef.current.getBoundingClientRect();
+            
+            // Cursor Recent Matches alanının üzerinde mi kontrol et
+            if (isPointInRect(cursorX, cursorY, recentMatchesRect)) {
+              const scrollAmount = 30;
+              if (data.scrollDirection === 'up') {
+                recentMatchesRef.current.scrollTop -= scrollAmount;
+              } else if (data.scrollDirection === 'down') {
+                recentMatchesRef.current.scrollTop += scrollAmount;
+              }
+            }
+          }
+        } else if (data.type === 'gestureUpdate' && data.gesture) {
           setGesture(data.gesture);
         } else if (data.type === 'gameResult') {
           setResult(data.result);
@@ -130,7 +167,7 @@ const RockPaperScissors = () => {
           transform: 'translate(-50%, -50%)',
           transition: 'all 0.05s ease',
           width: '24px',
-          height: '24px',
+          height: '24px'
         }}
       >
         <div className="absolute inset-0 rounded-full bg-blue-500 opacity-30 animate-pulse"></div>
@@ -160,14 +197,14 @@ const RockPaperScissors = () => {
         <div className="flex justify-center gap-4 mb-8">
           <button 
             onClick={startGame}
-            className="px-6 py-3 bg-green-500 hover:bg-green-600 rounded-lg font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            className="start-button px-6 py-3 bg-green-500 hover:bg-green-600 rounded-lg font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             disabled={!isCameraConnected || !isPythonConnected || isPlaying}
           >
             {isPlaying ? `${countdown}...` : 'Start Game'}
           </button>
           <button 
             onClick={resetGame}
-            className="px-6 py-3 bg-red-500 hover:bg-red-600 rounded-lg font-bold transition-all"
+            className="reset-button px-6 py-3 bg-red-500 hover:bg-red-600 rounded-lg font-bold transition-all"
           >
             Reset
           </button>
@@ -225,14 +262,16 @@ const RockPaperScissors = () => {
                 </div>
               ))}
             </div>
-            <p className="text-sm text-center mt-4 text-blue-200">
-              Show your gesture to the camera when countdown ends
-            </p>
+            <div className="text-sm text-center mt-4 text-blue-200 space-y-2">
+              <p>Show your gesture to the camera when countdown ends</p>
+              <p>Use index finger to hover and pinch to click buttons</p>
+              <p>For Recent Matches: Hover and raise two fingers to scroll up/down</p>
+            </div>
           </div>
 
           <div className="bg-white/10 rounded-xl p-6 backdrop-blur-sm">
             <h2 className="text-xl font-bold mb-4 text-center">Recent Matches</h2>
-            <div className="max-h-48 overflow-y-auto">
+            <div ref={recentMatchesRef} className="max-h-48 overflow-y-auto">
               {gameHistory.map((game, index) => (
                 <div 
                   key={index} 
