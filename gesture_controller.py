@@ -73,16 +73,16 @@ class RPSGestureController:
                 try:
                     data = json.loads(message)
                     if data.get('type') == 'gameStart':
-                        if not self.game_active:  # Yeni oyun sadece aktif değilse başlasın
+                        # Only start a game if one isn't already active
+                        if not self.game_active:
                             self.game_active = True
-                            self.current_gesture = None  # Gesture'ı sıfırla
                             await asyncio.sleep(3)
                             if self.current_gesture:
                                 game_result = self.play_game(self.current_gesture)
                                 await websocket.send(json.dumps(game_result))
-                            # Oyunu bitirince sıfırla
+                            # Reset game state after completion
                             self.game_active = False
-                            self.current_gesture = None
+                            self.current_gesture = None  # Reset the current gesture
                     elif data.get('type') == 'reset':
                         self.game_active = False
                         self.current_gesture = None
@@ -92,7 +92,6 @@ class RPSGestureController:
             logging.info("Client disconnected")
         finally:
             self.websocket = None
-
 
     def detect_gesture(self, hand_landmarks):
         fingers_extended = []
@@ -161,28 +160,24 @@ class RPSGestureController:
     async def send_gesture_data(self, data):
         if self.websocket and not self.game_active:
             try:
-                # Yeni bir gesture mevcutsa gönder
                 if data.get('gesture') != self.current_gesture:
                     await self.websocket.send(json.dumps({**data, 'type': 'gestureUpdate'}))
-                    self.current_gesture = data.get('gesture')  # Yeni gesture'ı kaydet
+                    self.current_gesture = data.get('gesture')
             except Exception as e:
                 logging.error(f"Error sending gesture data: {e}")
 
     def play_game(self, player_gesture):
         choices = ['rock', 'paper', 'scissors']
         computer_choice = random.choice(choices)
-
+        
         if player_gesture == computer_choice:
             result = 'Tie'
         elif (player_gesture == 'rock' and computer_choice == 'scissors') or \
-            (player_gesture == 'paper' and computer_choice == 'rock') or \
-            (player_gesture == 'scissors' and computer_choice == 'paper'):
+             (player_gesture == 'paper' and computer_choice == 'rock') or \
+             (player_gesture == 'scissors' and computer_choice == 'paper'):
             result = 'Win'
         else:
             result = 'Lose'
-
-        # Oyunu bitirdikten sonra gesture sıfırla
-        self.current_gesture = None
 
         return {
             'type': 'gameResult',
@@ -190,7 +185,6 @@ class RPSGestureController:
             'playerMove': player_gesture,
             'computerMove': computer_choice
         }
-
 
     def start_websocket_server(self):
         async def serve():
