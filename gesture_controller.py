@@ -6,6 +6,7 @@ import json
 import threading
 import logging
 import random
+import time
 
 logging.basicConfig(level=logging.INFO)
 
@@ -27,6 +28,16 @@ class RPSGestureController:
         self.start_websocket_server()
         self.last_hand_position = None
         self.last_scroll_y = None
+        
+        # Gesture stabilization için değişkenler
+        self.gesture_history = []
+        self.gesture_history_size = 3
+        self.last_stable_gesture = None
+        self.last_gesture_time = time.time()
+        self.gesture_cooldown = 0.5
+
+        # Yeni oyun başlatma bayrağı
+        self.game_started = False
 
     def calculate_distance(self, p1, p2):
         return ((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2) ** 0.5
@@ -64,42 +75,19 @@ class RPSGestureController:
         self.last_scroll_y = None
         return None
 
-    async def handler(self, websocket):
-        logging.info("New client connected")
-        self.websocket = websocket
-        try:
-            await websocket.send(json.dumps({"status": "connected"}))
-            async for message in websocket:
-                try:
-                    data = json.loads(message)
-                    if data.get('type') == 'gameStart':
-                        # Only start a game if one isn't already active
-                        if not self.game_active:
-                            self.game_active = True
-                            await asyncio.sleep(3)
-                            if self.current_gesture:
-                                game_result = self.play_game(self.current_gesture)
-                                await websocket.send(json.dumps(game_result))
-                            # Reset game state after completion
-                            self.game_active = False
-                            self.current_gesture = None  # Reset the current gesture
-                    elif data.get('type') == 'reset':
-                        self.game_active = False
-                        self.current_gesture = None
-                except Exception as e:
-                    logging.error(f"Error handling message: {e}")
-        except websockets.exceptions.ConnectionClosed:
-            logging.info("Client disconnected")
-        finally:
-            self.websocket = None
-
     def detect_gesture(self, hand_landmarks):
         fingers_extended = []
         
+        # Başparmak kontrolü - geliştirilmiş 3B analiz
         thumb_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_TIP]
         thumb_ip = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_IP]
-        fingers_extended.append(thumb_tip.x < thumb_ip.x)
+        thumb_mcp = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_MCP]
+        
+        thumb_extended = (thumb_tip.x - thumb_ip.x) ** 2 + (thumb_tip.y - thumb_ip.y) ** 2 > \
+                        (thumb_ip.x - thumb_mcp.x) ** 2 + (thumb_ip.y - thumb_mcp.y) ** 2
+        fingers_extended.append(thumb_extended)
 
+        # Diğer parmakların kontrolü - geliştirilmiş hassasiyet
         finger_tips = [
             self.mp_hands.HandLandmark.INDEX_FINGER_TIP,
             self.mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
@@ -112,22 +100,52 @@ class RPSGestureController:
             self.mp_hands.HandLandmark.RING_FINGER_PIP,
             self.mp_hands.HandLandmark.PINKY_PIP
         ]
+        finger_mcps = [
+            self.mp_hands.HandLandmark.INDEX_FINGER_MCP,
+            self.mp_hands.HandLandmark.MIDDLE_FINGER_MCP,
+            self.mp_hands.HandLandmark.RING_FINGER_MCP,
+            self.mp_hands.HandLandmark.PINKY_MCP
+        ]
 
-        for finger_tip, finger_pip in zip(finger_tips, finger_pips):
-            tip = hand_landmarks.landmark[finger_tip]
-            pip = hand_landmarks.landmark[finger_pip]
-            fingers_extended.append(tip.y < pip.y)
+        for tip, pip, mcp in zip(finger_tips, finger_pips, finger_mcps):
+            tip_landmark = hand_landmarks.landmark[tip]
+            pip_landmark = hand_landmarks.landmark[pip]
+            mcp_landmark = hand_landmarks.landmark[mcp]
+            
+            extended = (tip_landmark.y < pip_landmark.y) and (pip_landmark.y < mcp_landmark.y)
+            fingers_extended.append(extended)
+
+        # Hareket kararlılığı kontrolü
+        current_time = time.time()
+        if current_time - self.last_gesture_time < self.gesture_cooldown:
+            return self.last_stable_gesture or "Waiting..."
 
         extended_count = sum(fingers_extended)
-
-        if extended_count <= 1:
-            return "rock"
-        elif extended_count >= 4:
-            return "paper"
-        elif fingers_extended[1] and fingers_extended[2] and not fingers_extended[3] and not fingers_extended[4]:
-            return "scissors"
         
-        return "Waiting..."
+        # Hareket tespiti
+        if extended_count <= 1:
+            raw_gesture = "rock"
+        elif extended_count >= 4:
+            raw_gesture = "paper"
+        elif fingers_extended[1] and fingers_extended[2] and not fingers_extended[3] and not fingers_extended[4]:
+            raw_gesture = "scissors"
+        else:
+            raw_gesture = "Waiting..."
+
+        # Hareket geçmişi güncelleme ve stabilizasyon
+        self.gesture_history.append(raw_gesture)
+        if len(self.gesture_history) > self.gesture_history_size:
+            self.gesture_history.pop(0)
+
+        if len(self.gesture_history) == self.gesture_history_size:
+            most_common = max(set(self.gesture_history), key=self.gesture_history.count)
+            if self.gesture_history.count(most_common) >= self.gesture_history_size * 0.6:
+                if most_common != self.last_stable_gesture:
+                    self.last_stable_gesture = most_common
+                    self.last_gesture_time = current_time
+                return most_common
+
+        return self.last_stable_gesture or "Waiting..."
 
     def get_hand_position(self, hand_landmarks):
         index_finger_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
@@ -139,6 +157,35 @@ class RPSGestureController:
             'y': index_finger_tip.y,
             'is_clicking': is_pinching
         }
+
+    async def handler(self, websocket):
+        logging.info("New client connected")
+        self.websocket = websocket
+        try:
+            await websocket.send(json.dumps({"status": "connected"}))
+            async for message in websocket:
+                try:
+                    data = json.loads(message)
+                    if data.get('type') == 'gameStart':
+                        if not self.game_started:
+                            self.game_started = True
+                            await self.start_countdown()
+                            await self.play_round()
+                            self.game_started = False  # Yeni oyun başlamadan önce eski oyun bitmeli
+                        else:
+                            logging.info("Game already started. Please wait for the current game to finish.")
+                    elif data.get('type') == 'reset':
+                        self.game_active = False
+                        self.current_gesture = None
+                        self.gesture_history = []
+                        self.last_stable_gesture = None
+                        self.game_started = False
+                except Exception as e:
+                    logging.error(f"Error handling message: {e}")
+        except websockets.exceptions.ConnectionClosed:
+            logging.info("Client disconnected")
+        finally:
+            self.websocket = None
 
     async def send_hand_data(self, data):
         if self.websocket:
@@ -166,8 +213,10 @@ class RPSGestureController:
             except Exception as e:
                 logging.error(f"Error sending gesture data: {e}")
 
-    def play_game(self, player_gesture):
+    async def play_round(self):
+        # İlk oyunu başlat ve sonucu kontrol et
         choices = ['rock', 'paper', 'scissors']
+        player_gesture = self.last_stable_gesture
         computer_choice = random.choice(choices)
         
         if player_gesture == computer_choice:
@@ -179,12 +228,20 @@ class RPSGestureController:
         else:
             result = 'Lose'
 
-        return {
+        game_result = {
             'type': 'gameResult',
             'result': result,
             'playerMove': player_gesture,
             'computerMove': computer_choice
         }
+
+        # Sonuç gönder ve oyun bitir
+        await self.websocket.send(json.dumps(game_result))
+
+    async def start_countdown(self):
+        for i in range(3, 0, -1):
+            logging.info(f"Starting game in {i}...")
+            await asyncio.sleep(1)
 
     def start_websocket_server(self):
         async def serve():
@@ -232,6 +289,9 @@ class RPSGestureController:
                 gesture = self.detect_gesture(hand_landmarks)
                 if gesture:
                     gesture_data["gesture"] = gesture
+                    # Ekranda mevcut hareketi göster
+                    cv2.putText(frame, f"Gesture: {gesture}", (10, 60), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
             if hand_position and self.websocket:
                 data_to_send = {
