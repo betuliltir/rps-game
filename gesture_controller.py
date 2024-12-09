@@ -34,34 +34,22 @@ class RPSGestureController:
     def detect_pinch(self, hand_landmarks):
         thumb_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_TIP]
         index_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
-        
-        # Parmak uçları arasındaki mesafeyi hesapla
         distance = self.calculate_distance(thumb_tip, index_tip)
-        
-        # Mesafe belirli bir eşiğin altındaysa pinch olarak kabul et
         return distance < 0.05
 
-    
     def detect_two_finger_scroll(self, hand_landmarks):
-        # İşaret ve orta parmak uçlarının pozisyonlarını al
         index_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
         middle_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
-        
-        # Parmak PIP eklemlerinin pozisyonlarını al
         index_pip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_PIP]
         middle_pip = hand_landmarks.landmark[self.mp_hands.HandLandmark.MIDDLE_FINGER_PIP]
         
-        # İki parmağın uzatılmış olduğunu kontrol et
         index_extended = index_tip.y < index_pip.y
         middle_extended = middle_tip.y < middle_pip.y
         
         if index_extended and middle_extended:
-            # Parmakların ortalama Y pozisyonu
             avg_y = (index_tip.y + middle_tip.y) / 2
             
-            # Son pozisyonla karşılaştırarak hareket yönünü belirle
-            if hasattr(self, 'last_scroll_y'):
-                # Minimum hareket eşiği ekle (0.01 değerini ayarlayabilirsiniz)
+            if self.last_scroll_y is not None:
                 movement_threshold = 0.01
                 y_difference = avg_y - self.last_scroll_y
                 
@@ -69,11 +57,11 @@ class RPSGestureController:
                     scroll_direction = 'up' if y_difference < 0 else 'down'
                     self.last_scroll_y = avg_y
                     return scroll_direction
-            else:
-                self.last_scroll_y = avg_y
-        else:
-            self.last_scroll_y = None
+            
+            self.last_scroll_y = avg_y
+            return None
         
+        self.last_scroll_y = None
         return None
 
     async def handler(self, websocket):
@@ -85,12 +73,16 @@ class RPSGestureController:
                 try:
                     data = json.loads(message)
                     if data.get('type') == 'gameStart':
-                        self.game_active = True
-                        await asyncio.sleep(3)
-                        if self.current_gesture:
-                            game_result = self.play_game(self.current_gesture)
-                            await websocket.send(json.dumps(game_result))
-                        self.game_active = False
+                        if not self.game_active:  # Yeni oyun sadece aktif değilse başlasın
+                            self.game_active = True
+                            self.current_gesture = None  # Gesture'ı sıfırla
+                            await asyncio.sleep(3)
+                            if self.current_gesture:
+                                game_result = self.play_game(self.current_gesture)
+                                await websocket.send(json.dumps(game_result))
+                            # Oyunu bitirince sıfırla
+                            self.game_active = False
+                            self.current_gesture = None
                     elif data.get('type') == 'reset':
                         self.game_active = False
                         self.current_gesture = None
@@ -101,15 +93,14 @@ class RPSGestureController:
         finally:
             self.websocket = None
 
+
     def detect_gesture(self, hand_landmarks):
         fingers_extended = []
         
-        # Thumb
         thumb_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_TIP]
         thumb_ip = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_IP]
         fingers_extended.append(thumb_tip.x < thumb_ip.x)
 
-        # Other fingers
         finger_tips = [
             self.mp_hands.HandLandmark.INDEX_FINGER_TIP,
             self.mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
@@ -150,14 +141,12 @@ class RPSGestureController:
             'is_clicking': is_pinching
         }
 
-
     async def send_hand_data(self, data):
         if self.websocket:
             try:
                 hand_position = data['hand_position']
                 scroll_direction = data.get('scroll_direction')
                 
-                # Web tarafında kullanmak üzere el pozisyonunu da gönder
                 await self.websocket.send(json.dumps({
                     'type': 'handPosition',
                     'x': hand_position['web_x'],
@@ -172,24 +161,28 @@ class RPSGestureController:
     async def send_gesture_data(self, data):
         if self.websocket and not self.game_active:
             try:
+                # Yeni bir gesture mevcutsa gönder
                 if data.get('gesture') != self.current_gesture:
                     await self.websocket.send(json.dumps({**data, 'type': 'gestureUpdate'}))
-                    self.current_gesture = data.get('gesture')
+                    self.current_gesture = data.get('gesture')  # Yeni gesture'ı kaydet
             except Exception as e:
                 logging.error(f"Error sending gesture data: {e}")
 
     def play_game(self, player_gesture):
         choices = ['rock', 'paper', 'scissors']
         computer_choice = random.choice(choices)
-        
+
         if player_gesture == computer_choice:
             result = 'Tie'
         elif (player_gesture == 'rock' and computer_choice == 'scissors') or \
-             (player_gesture == 'paper' and computer_choice == 'rock') or \
-             (player_gesture == 'scissors' and computer_choice == 'paper'):
+            (player_gesture == 'paper' and computer_choice == 'rock') or \
+            (player_gesture == 'scissors' and computer_choice == 'paper'):
             result = 'Win'
         else:
             result = 'Lose'
+
+        # Oyunu bitirdikten sonra gesture sıfırla
+        self.current_gesture = None
 
         return {
             'type': 'gameResult',
@@ -197,6 +190,7 @@ class RPSGestureController:
             'playerMove': player_gesture,
             'computerMove': computer_choice
         }
+
 
     def start_websocket_server(self):
         async def serve():
@@ -226,20 +220,17 @@ class RPSGestureController:
                 hand_position = self.get_hand_position(hand_landmarks)
                 scroll_direction = self.detect_two_finger_scroll(hand_landmarks)
                 
-                # İşaret parmağı pozisyonunu ve click durumunu görsel olarak işaretle
                 if hand_position:
                     h, w, _ = frame.shape
                     cx = int(hand_position['x'] * w)
                     cy = int(hand_position['y'] * h)
                     
-                    # Click durumuna göre görsel geri bildirim
                     if hand_position['is_clicking']:
-                        cv2.circle(frame, (cx, cy), 12, (0, 0, 255), -1)  # Kırmızı dolu daire
+                        cv2.circle(frame, (cx, cy), 12, (0, 0, 255), -1)
                     else:
-                        cv2.circle(frame, (cx, cy), 8, (0, 255, 0), -1)   # Yeşil nokta
-                        cv2.circle(frame, (cx, cy), 12, (0, 255, 0), 2)   # Yeşil dış çember
+                        cv2.circle(frame, (cx, cy), 8, (0, 255, 0), -1)
+                        cv2.circle(frame, (cx, cy), 12, (0, 255, 0), 2)
                 
-                # Scroll yönünü ekrana çiz
                 if scroll_direction:
                     text = f"Scroll: {scroll_direction}"
                     cv2.putText(frame, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
@@ -278,14 +269,15 @@ class RPSGestureController:
 
                 frame, gesture_data, hand_position = self.process_frame(frame)
 
-                asyncio.run_coroutine_threadsafe(
-                    self.send_gesture_data(gesture_data),
-                    self.loop
-                )
+                if self.websocket:
+                    asyncio.run_coroutine_threadsafe(
+                        self.send_gesture_data(gesture_data),
+                        self.loop
+                    )
 
                 cv2.imshow('Rock Paper Scissors', frame)
 
-                if cv2.waitKey(1) & 0xFF == 27:  # ESC tuşu ile çık
+                if cv2.waitKey(1) & 0xFF == 27:  # ESC to quit
                     break
         finally:
             cap.release()
